@@ -112,7 +112,6 @@ def non_max_suppression(
     if not rotated:
         prediction[..., :4] = xywh2xyxy(prediction[..., :4])  # xywh to xyxy
 
-    save_preprocessed_to_txt(prediction,"./nms_pred")
     t = time.time()
     output = [np.zeros((0, 6 + extra)) for _ in range(bs)]
     keepi = [np.zeros((0, 1)) for _ in range(bs)]
