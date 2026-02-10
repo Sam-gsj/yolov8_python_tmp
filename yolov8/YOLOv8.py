@@ -6,7 +6,7 @@ import os  # 新增：用于创建保存目录
 from typing import Any, List
 from .nms import non_max_suppression
 
-from .utils import xywh2xyxy, multiclass_nms, draw_detections, save_preprocessed_to_txt
+from .utils import xywh2xyxy, scale_boxes, draw_detections, save_preprocessed_to_txt
 
 
 
@@ -152,6 +152,9 @@ class YOLOv8:
         elif not isinstance(im, list):
             raise TypeError(f"输入必须是 np.ndarray 或 list[np.ndarray]，当前类型: {type(im)}")
         
+        if len(im) == 1:
+            self.img_height, self.img_width = im[0].shape[0], im[0].shape[1]
+        
         # 调整尺寸
         im = self.pre_transform(im)
         # 堆叠为批量数组 (N, H, W, 3)
@@ -168,8 +171,7 @@ class YOLOv8:
         im /= 255.0
         
         # 记录原始图片尺寸
-        if len(im) == 1:
-            self.img_height, self.img_width = im.shape[2], im.shape[3]
+
         
         # 保存为 TXT 格式
         if save_to_txt:
@@ -225,31 +227,45 @@ class YOLOv8:
         return outputs
 
     def process_output(self, output):
-        preds = non_max_suppression(
+        """
+        处理推理输出：执行 NMS 并将坐标还原回原始图像尺寸
+        核心改动：
+        1. 先处理batch维度，再转为NumPy数组（避免维度混乱）
+        2. 正确判断NumPy数组是否为空（无布尔歧义）
+        3. 保留强制转NumPy的需求，同时保证逻辑正确
+        """
+        # 1. 执行 NMS
+        # NMS返回：list[np.ndarray] → 每个元素是单张图的检测结果 (N,6)
+        predictions = non_max_suppression(
             output,
             self.conf_threshold,
-            self.iou_threshold,
-            [],
-            False,
-            max_det=300,
-            nc=0 ,
-            end2end=False,
-            rotated=False,
-            return_idxs=False,
+            self.iou_threshold
         )
-        predictions = np.squeeze(output[0]).T
-        scores = np.max(predictions[:, 4:], axis=1)
-        predictions = predictions[scores > self.conf_threshold, :]
-        scores = scores[scores > self.conf_threshold]
 
-        if len(scores) == 0:
-            return [], [], []
+        # 2. 处理batch维度（假设batch_size=1，取第一张图的结果）
+        if not predictions:  # 先判断列表是否为空（Python list可正常判断）
+            return np.array([]), np.array([]), np.array([])
+        
+        # 取第一张图的结果，并强制转为NumPy数组（满足你的核心需求）
+        det = np.array(predictions[0], dtype=np.float32)  # 单张图结果转NumPy
 
-        class_ids = np.argmax(predictions[:, 4:], axis=1)
-        boxes = self.extract_boxes(predictions)
-        indices = multiclass_nms(boxes, scores, class_ids, self.iou_threshold)
+        # 3. 正确判断NumPy数组是否为空（核心修复：避免布尔歧义）
+        if det.size == 0:  # 用size判断空数组，替代if not det
+            return np.array([]), np.array([]), np.array([])
 
-        return boxes[indices], scores[indices], class_ids[indices]
+        # 4. 将模型输入尺寸的框缩放到原始图像尺寸
+        det[:, :4] = scale_boxes(
+            img1_shape=(self.input_height, self.input_width),
+            boxes=det[:, :4],
+            img0_shape=(self.img_height, self.img_width)
+        )
+
+        # 5. 分离数据（此时det是(N,6)的NumPy数组）
+        boxes = det[:, :4]          # 原始尺寸的框 (N,4)
+        scores = det[:, 4]          # 置信度 (N,)
+        class_ids = det[:, 5].astype(int)  # 类别索引 (N,)
+
+        return boxes, scores, class_ids
 
     def extract_boxes(self, predictions):
         boxes = predictions[:, :4]
@@ -277,6 +293,37 @@ class YOLOv8:
     def get_output_details(self):
         model_outputs = self.session.get_outputs()
         self.output_names = [model_outputs[i].name for i in range(len(model_outputs))]
+
+    def construct_results(self, preds, img, orig_imgs):
+        """Construct a list of Results objects from model predictions.
+
+        Args:
+            preds (list[torch.Tensor]): List of predicted bounding boxes and scores for each image.
+            img (torch.Tensor): Batch of preprocessed images used for inference.
+            orig_imgs (list[np.ndarray]): List of original images before preprocessing.
+
+        Returns:
+            (list[Results]): List of Results objects containing detection information for each image.
+        """
+        return [
+            self.construct_result(pred, img, orig_img, img_path)
+            for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0])
+        ]
+
+    def construct_result(self, pred, img, orig_img, img_path):
+        """Construct a single Results object from one image prediction.
+
+        Args:
+            pred (torch.Tensor): Predicted boxes and scores with shape (N, 6) where N is the number of detections.
+            img (torch.Tensor): Preprocessed image tensor used for inference.
+            orig_img (np.ndarray): Original image before preprocessing.
+            img_path (str): Path to the original image file.
+
+        Returns:
+            (Results): Results object containing the original image, image path, class names, and scaled bounding boxes.
+        """
+        pred[:, :4] = scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
+        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6])
 
 if __name__ == '__main__':
     # 测试代码

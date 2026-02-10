@@ -177,3 +177,69 @@ def save_preprocessed_to_txt(im, save_path):
             f.write(row_str + "\n")
     
     print(f"数组已保存到: {txt_path}")
+
+
+def scale_boxes(img1_shape, boxes, img0_shape, ratio_pad=None, padding: bool = True, xywh: bool = False):
+    """
+    纯NumPy实现：将边界框从 img1_shape 缩放到 img0_shape（对齐原逻辑）
+    支持 xyxy/xywh 格式，处理 LetterBox 填充的反向缩放
+    
+    Args:
+        img1_shape (tuple): 源图像形状 (height, width)（模型输入尺寸）
+        boxes (np.ndarray): 待缩放的边界框，形状 (N, 4)
+        img0_shape (tuple): 目标图像形状 (height, width)（原始图像尺寸）
+        ratio_pad (tuple, optional): (ratio, pad) 缩放参数，None 则自动计算
+        padding (bool): 是否考虑 LetterBox 填充的偏移
+        xywh (bool): 框格式是否为 xywh（True），否则为 xyxy（False）
+    
+    Returns:
+        np.ndarray: 缩放后的边界框，格式与输入一致
+    """
+    # 转换为NumPy数组（兼容其他输入类型）
+    boxes = np.array(boxes, dtype=np.float32)
+    
+    # 计算缩放比例和填充量
+    if ratio_pad is None:  # 自动计算 gain 和 pad
+        # gain = 模型输入尺寸 / 原始图像缩放后的尺寸（old/new）
+        gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])
+        # 计算LetterBox的填充量（左右/上下）
+        pad_x = round((img1_shape[1] - img0_shape[1] * gain) / 2 - 0.1)
+        pad_y = round((img1_shape[0] - img0_shape[0] * gain) / 2 - 0.1)
+    else:
+        gain = ratio_pad[0][0]
+        pad_x, pad_y = ratio_pad[1]
+
+    # 反向抵消LetterBox的填充偏移
+    if padding:
+        boxes[..., 0] -= pad_x  # x1 (或xywh的x) 抵消水平填充
+        boxes[..., 1] -= pad_y  # y1 (或xywh的y) 抵消垂直填充
+        if not xywh:  # xyxy格式需要同时调整x2/y2
+            boxes[..., 2] -= pad_x
+            boxes[..., 3] -= pad_y
+    
+    # 按缩放比例反向缩放（恢复到原始图像尺寸）
+    boxes[..., :4] /= gain
+    
+    # xyxy格式需要裁剪到图像边界，xywh格式直接返回
+    return boxes if xywh else clip_boxes(boxes, img0_shape)
+
+def clip_boxes(boxes, shape):
+    """
+    纯NumPy实现：将边界框裁剪到图像边界内（防止框超出图像）
+    
+    Args:
+        boxes (np.ndarray): 待裁剪的边界框，形状 (N, 4)（xyxy格式）
+        shape (tuple): 图像形状 (height, width) 或 (height, width, channel)
+    
+    Returns:
+        np.ndarray: 裁剪后的边界框
+    """
+    # 提取图像高宽（兼容HWC/HW格式）
+    h, w = shape[:2]
+    
+    # 批量裁剪：将x1/x2限制在[0, w]，y1/y2限制在[0, h]
+    # 比逐元素裁剪更快（NumPy向量化操作）
+    boxes[..., [0, 2]] = np.clip(boxes[..., [0, 2]], 0, w)  # x1, x2
+    boxes[..., [1, 3]] = np.clip(boxes[..., [1, 3]], 0, h)  # y1, y2
+    
+    return boxes
