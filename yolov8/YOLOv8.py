@@ -173,10 +173,12 @@ class YOLOv8:
         return outputs
 
     def process_output(self, output):
+        keep_classes = [0, 1, 2, 3,5]
         predictions = non_max_suppression(
             output,
             self.conf_threshold,
-            self.iou_threshold
+            self.iou_threshold,
+            classes = keep_classes
         )
 
         if not predictions:
